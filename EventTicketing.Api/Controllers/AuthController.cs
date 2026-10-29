@@ -81,7 +81,12 @@ namespace EventTicketing.Api.Controllers
                 });
             }
 
-            return Ok(new { token = result.Token, expiresIn = result.ExpiresIn });
+            return Ok(new
+            {
+                token = result.Token,
+                refreshToken = result.RefreshToken,
+                expiresIn = result.ExpiresIn
+            });
         }
 
         [HttpPost("logout")]

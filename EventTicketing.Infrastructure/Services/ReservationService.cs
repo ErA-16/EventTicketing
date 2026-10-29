@@ -16,7 +16,7 @@ namespace EventTicketing.Infrastructure.Services
 {
     public class ReservationService : IReservationService
     {
-        private static readonly TimeSpan IdempotencyRetention = TimeSpan.FromHours(24);
+        internal static readonly TimeSpan IdempotencyRetention = TimeSpan.FromHours(24);
         private const int MaxTicketCodeAttempts = 5;
         private const string TicketCodeAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
@@ -93,6 +93,14 @@ namespace EventTicketing.Infrastructure.Services
             if (now - paidAt >= IdempotencyRetention)
             {
                 throw new IdempotencyKeyExpiredException("This idempotency key has expired.");
+            }
+        }
+
+        private static void EnsureClearedIdempotencyKeyNotExpired(Reservation reservation, DateTime now)
+        {
+            if (reservation.PaymentIdempotencyKey is null)
+            {
+                EnsureIdempotencyKeyNotExpired(reservation, now);
             }
         }
 
@@ -315,6 +323,7 @@ namespace EventTicketing.Infrastructure.Services
             {
                 if (reservation.PaymentIdempotencyKey != idempotencyKey)
                 {
+                    EnsureClearedIdempotencyKeyNotExpired(reservation, now);
                     throw new ConflictException("Reservation is already paid.");
                 }
 
@@ -381,6 +390,7 @@ namespace EventTicketing.Infrastructure.Services
                 {
                     if (active.PaymentIdempotencyKey != idempotencyKey)
                     {
+                        EnsureClearedIdempotencyKeyNotExpired(active, now);
                         throw new ConflictException("You already have a ticket for this event.");
                     }
 

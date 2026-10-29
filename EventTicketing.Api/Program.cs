@@ -244,7 +244,9 @@ builder.Services.AddScoped<IStockQueryService, EventTicketing.Infrastructure.Ser
 builder.Services.AddScoped<IWalletService, EventTicketing.Infrastructure.Services.WalletService>();
 builder.Services.AddScoped<IReservationService, EventTicketing.Infrastructure.Services.ReservationService>();
 builder.Services.AddScoped<ITicketService, EventTicketing.Infrastructure.Services.TicketService>();
+builder.Services.AddScoped<IDataRetentionService, DataRetentionService>();
 builder.Services.AddHostedService<ReservationExpiryJob>();
+builder.Services.AddHostedService<DataRetentionJob>();
 
 builder.Services.AddRateLimiter(options =>
 {

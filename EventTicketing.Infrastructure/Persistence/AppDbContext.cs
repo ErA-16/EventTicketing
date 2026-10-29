@@ -87,6 +87,7 @@ namespace EventTicketing.Infrastructure.Persistence
 
                 entity.HasIndex(e => e.OrganizerId);
                 entity.HasIndex(e => new { e.Status, e.CreatedAt });
+                entity.HasIndex(e => e.StartsAt);
             });
 
             builder.Entity<TicketType>(entity =>
@@ -160,6 +161,14 @@ namespace EventTicketing.Infrastructure.Persistence
                       .HasDatabaseName("IX_Reservations_Status_ExpiresAt")
                       .HasFilter("\"Status\" = 'Held'");
 
+                entity.HasIndex(r => new { r.Status, r.ExpiresAt })
+                      .HasDatabaseName("IX_Reservations_Status_ExpiresAt_Dead")
+                      .HasFilter("\"Status\" IN ('Expired', 'Cancelled')");
+
+                entity.HasIndex(r => r.PaidAt)
+                      .HasDatabaseName("IX_Reservations_PaidAt_Idempotency")
+                      .HasFilter("\"PaymentIdempotencyKey\" IS NOT NULL");
+
                 entity.ToTable(tb => tb.HasCheckConstraint(
                     "CK_Reservations_Price_NonNegative", "\"PriceAtReservation\" >= 0"));
                 entity.ToTable(tb => tb.HasCheckConstraint(
@@ -204,8 +213,10 @@ namespace EventTicketing.Infrastructure.Persistence
                 entity.HasKey(t => t.Id);
 
                 entity.Property(t => t.TokenHash).HasMaxLength(64).IsRequired();
+                entity.Property(t => t.ReplacedByTokenHash).HasMaxLength(64);
                 entity.Property(t => t.CreatedAt).HasColumnType("timestamp with time zone");
                 entity.Property(t => t.ExpiresAt).HasColumnType("timestamp with time zone");
+                entity.Property(t => t.AbsoluteExpiresAt).HasColumnType("timestamp with time zone");
                 entity.Property(t => t.RevokedAt).HasColumnType("timestamp with time zone");
 
                 entity.HasOne<EventTicketingUser>()
@@ -215,6 +226,10 @@ namespace EventTicketing.Infrastructure.Persistence
 
                 entity.HasIndex(t => t.TokenHash).IsUnique();
                 entity.HasIndex(t => t.UserId);
+                entity.HasIndex(t => t.FamilyId);
+                entity.HasIndex(t => t.ExpiresAt);
+                entity.HasIndex(t => t.AbsoluteExpiresAt);
+                entity.HasIndex(t => t.RevokedAt);
             });
         }
     }

@@ -1067,6 +1067,82 @@ duplicate email → 400; wrong password → 401; admin login → 200 with JWT; r
 
 ---
 
+## Slice 18 - refresh-token rotation, absolute cap, data-retention purge (DONE)
+
+### What was built
+- **Refresh-token rotation with reuse detection.**
+  - `RefreshToken` gains `FamilyId`, `ReplacedByTokenHash`, `AbsoluteExpiresAt`.
+  - Every successful refresh issues a **new** token in the same family; the old row is revoked and
+    linked through `ReplacedByTokenHash`. History is one row per rotation.
+  - Replaying a revoked token is allowed only inside a 10-second grace window (client retry
+    protection). After that the **whole family is revoked** (token-theft detection).
+  - Absolute cap: `RefreshToken:AbsoluteMinutes` (default 10080 = 7 days). The access token is
+    clamped to the session's absolute end, so it can never outlive the family; `expiresIn` reflects it.
+  - `RefreshAsync` locks the row with `FOR UPDATE` (`FromSqlInterpolated`) so concurrent refreshes
+    serialize; `LogoutAsync` revokes the entire family. login returns `refreshToken` again and every
+    refresh returns a fresh pair.
+- **Data-retention job:** `DataRetentionService` + `DataRetentionJob` (immediate first sweep, then
+  `DataRetention:IntervalMinutes`, default 60, minimum 5).
+  - Deletes `Expired`/`Cancelled` reservations whose event `StartsAt` is 30+ days past **and** which
+    have no ticket (`DeadReservationDaysAfterEvent`).
+  - Clears `PaymentIdempotencyKey` from `Paid` reservations older than the 24h replay window; the row
+    is retained, only the key is nulled.
+  - Deletes refresh tokens 7 days (`RefreshTokenDaysAfterExpiry`) after `ExpiresAt`, `RevokedAt` or
+    `AbsoluteExpiresAt`.
+  - All three are batched raw SQL with `FOR UPDATE SKIP LOCKED`; batch 500 and max 20 batches per
+    sweep, both config-validated (fail-fast construction).
+  - `ReservationService`: replays against a paid reservation whose key was cleared are handled
+    (`EnsureClearedIdempotencyKeyNotExpired` -> `idempotency_key_expired` when past the window);
+    `IdempotencyRetention` became internal so the retention service reuses the same constant.
+- **Config changes:** `Jwt:ExpiryMinutes` 5 -> **15**; new `DataRetention` section in appsettings.json.
+- **Migration `20261029214056_AddRefreshTokenRotationAndRetentionIndexes` (applied to Neon):**
+  3 new RefreshToken columns; `IX_RefreshTokens_{FamilyId,ExpiresAt,AbsoluteExpiresAt,RevokedAt}`;
+  `IX_Reservations_Status_ExpiresAt_Dead` (Expired/Cancelled filter);
+  `IX_Reservations_PaidAt_Idempotency` (key-not-null filter); `IX_Events_StartsAt`.
+- **Behavior change for old rows:** the migration defaults `AbsoluteExpiresAt` to `-infinity`, so any
+  pre-existing refresh token dies on its next refresh and every client must log in once.
+
+### Rules/decisions
+- Family revocation is the accepted trade-off: after the grace window, replaying any rotated token
+  kills the whole family - attacker and legit client both re-login. Simple, standard, no token-family
+  metadata beyond `FamilyId` + `ReplacedByTokenHash`.
+- The deletion of tickets-bearing reservations is explicitly forbidden by the ticket `NOT EXISTS`
+  check - check-in history stays complete forever.
+- Key clearing keeps the reservation row (uniqueness/history) while ending the replay guarantee after
+  24h, matching the pre-existing `idempotency_key_expired` semantics.
+- All purges keep ACID batch small and can be run repeatedly; nothing deletes `Paid` rows or rows with
+  tickets.
+
+### Verified (against Neon; API on port 5599 then stopped, port free)
+- Build clean: **0 warnings, 0 errors**. All 14 prior migrations confirmed applied before this one.
+- Smoke suite passed: login -> 900s access + 64-char refresh; rotate -> new pair; grace replay of the
+  old token (<10 s) -> 200 with a further new pair; late reuse (>10 s) -> 401 refresh_failed and the
+  whole family revoked (the rotated child also 401); DB rows show `revoked=true` +
+  `ReplacedByTokenHash` set on each rotated row, unrelated family unaffected; logout -> 204 ->
+  refresh 401, second logout refresh 401 (idempotent).
+- Public events still read (data intact - 181 reservations in the dev DB).
+- Service-level check left to ErA's list below (token `AbsoluteExpiresAt`, family rows).
+
+### Manual test list (ErA)
+1. Login -> `token`, `refreshToken`, `expiresIn: 900`.
+2. Refresh -> new `token` + **new** `refreshToken`; DB shows the old row revoked with
+   `ReplacedByTokenHash` pointing at the new row's hash.
+3. Send two refresh calls back-to-back with the same old token -> both 200 (grace window).
+4. Log in on two devices; refresh each independently -> both families keep working.
+5. Reuse a rotated token after 10 s -> 401; the newer token of that family is dead too -> relologin.
+6. `Refresh:AbsoluteMinutes` cap: set a token's `AbsoluteExpiresAt` to the past in the DB -> refresh
+   401 `refresh_failed` (never extends).
+7. `__EFMigrationsHistory` contains `20261029214056…`; `RefreshTokens` has the three new columns and
+   four new indexes.
+8. Data-retention purge: set one Expired reservation's event `StartsAt` to 31 days ago -> within one
+   hour (or restart) the sweep deletes it and logs the count; a Paid reservation or one holding a
+   ticket is never deleted.
+9. Set a Paid reservation's `PaidAt` to 25 h ago -> next sweep nulls its key; replaying that key then
+   maps to the expired-key/already-paid response.
+10. Restart the API with nothing due -> no retention log line (silence is normal).
+
+---
+
 ## Next
 - **Render deployment is paused by ErA for now.** The Render/Cloudflare notes below are future
   reference only.
@@ -1088,7 +1164,7 @@ duplicate email → 400; wrong password → 401; admin login → 200 with JWT; r
 - The write test has **0 failures**, but p95 is still ~34 s because 20 buyers serialize on one
   ticket-type row. Decide whether to accept this or move to Option B (split reserve/pay) or Option C
   (atomic `ReservedQuantity` counter) before production load.
-- No slice committed yet. Candidates: a refresh-token cleanup job and a retention decision for old
-  reservations and idempotency keys (do not purge either without preserving their rules).
+- No slice committed yet. The refresh-token purge and retention decisions are now done in Slice 18;
+  still uncommitted.
 - Housekeeping: clean the Neon migration pair and remove the temporary `fe.*` test users/events if the
   shared DB should stay tidy.

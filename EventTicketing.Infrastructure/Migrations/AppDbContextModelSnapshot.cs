@@ -69,6 +69,8 @@ namespace EventTicketing.Infrastructure.Migrations
 
                     b.HasIndex("OrganizerId");
 
+                    b.HasIndex("StartsAt");
+
                     b.HasIndex("Status", "CreatedAt");
 
                     b.ToTable("Events", (string)null);
@@ -80,11 +82,21 @@ namespace EventTicketing.Infrastructure.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
+                    b.Property<DateTime>("AbsoluteExpiresAt")
+                        .HasColumnType("timestamp with time zone");
+
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTime>("ExpiresAt")
                         .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("FamilyId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("ReplacedByTokenHash")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
 
                     b.Property<DateTime?>("RevokedAt")
                         .HasColumnType("timestamp with time zone");
@@ -98,6 +110,14 @@ namespace EventTicketing.Infrastructure.Migrations
                         .HasColumnType("uuid");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("AbsoluteExpiresAt");
+
+                    b.HasIndex("ExpiresAt");
+
+                    b.HasIndex("FamilyId");
+
+                    b.HasIndex("RevokedAt");
 
                     b.HasIndex("TokenHash")
                         .IsUnique();
@@ -148,9 +168,13 @@ namespace EventTicketing.Infrastructure.Migrations
 
                     b.HasIndex("EventId");
 
+                    b.HasIndex("PaidAt")
+                        .HasDatabaseName("IX_Reservations_PaidAt_Idempotency")
+                        .HasFilter("\"PaymentIdempotencyKey\" IS NOT NULL");
+
                     b.HasIndex("Status", "ExpiresAt")
-                        .HasDatabaseName("IX_Reservations_Status_ExpiresAt")
-                        .HasFilter("\"Status\" = 'Held'");
+                        .HasDatabaseName("IX_Reservations_Status_ExpiresAt_Dead")
+                        .HasFilter("\"Status\" IN ('Expired', 'Cancelled')");
 
                     b.HasIndex("UserId", "EventId")
                         .IsUnique()

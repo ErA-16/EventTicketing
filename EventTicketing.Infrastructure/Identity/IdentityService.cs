@@ -69,6 +69,26 @@ namespace EventTicketing.Infrastructure.Identity
             return idleMinutes;
         }
 
+        private int GetRefreshTokenAbsoluteMinutes()
+        {
+            if (!int.TryParse(_configuration["RefreshToken:AbsoluteMinutes"], out var absoluteMinutes) || absoluteMinutes <= 0)
+            {
+                absoluteMinutes = 10080;
+            }
+
+            return absoluteMinutes;
+        }
+
+        private int GetRotationGraceSeconds()
+        {
+            if (!int.TryParse(_configuration["RefreshToken:RotationGraceSeconds"], out var graceSeconds) || graceSeconds < 0)
+            {
+                graceSeconds = 10;
+            }
+
+            return graceSeconds;
+        }
+
         private static string GenerateRefreshToken()
         {
             return Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
@@ -79,24 +99,41 @@ namespace EventTicketing.Infrastructure.Identity
             return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(token)));
         }
 
-        private async Task<string> IssueRefreshTokenAsync(Guid userId)
+        private (RefreshToken Entity, string RawToken) CreateRefreshToken(
+            Guid userId,
+            Guid familyId,
+            DateTime absoluteExpiresAt,
+            int idleMinutes,
+            DateTime now)
         {
-            var token = GenerateRefreshToken();
-            var now = DateTime.UtcNow;
+            var rawToken = GenerateRefreshToken();
+            var expiresAt = now.AddMinutes(idleMinutes);
+            if (absoluteExpiresAt < expiresAt)
+            {
+                expiresAt = absoluteExpiresAt;
+            }
 
-            _db.RefreshTokens.Add(new RefreshToken
+            return (new RefreshToken
             {
                 UserId = userId,
-                TokenHash = HashRefreshToken(token),
+                FamilyId = familyId,
+                TokenHash = HashRefreshToken(rawToken),
                 CreatedAt = now,
-                ExpiresAt = now.AddMinutes(GetRefreshTokenIdleMinutes())
-            });
-
-            await _db.SaveChangesAsync();
-            return token;
+                ExpiresAt = expiresAt,
+                AbsoluteExpiresAt = absoluteExpiresAt
+            }, rawToken);
         }
 
-        private async Task<string> GenerateTokenAsync(EventTicketingUser user)
+        private async Task RevokeFamilyAsync(Guid familyId, DateTime now)
+        {
+            await _db.RefreshTokens
+                .Where(token => token.FamilyId == familyId && token.RevokedAt == null)
+                .ExecuteUpdateAsync(setters => setters.SetProperty(token => token.RevokedAt, now));
+        }
+
+        private async Task<(string Token, int ExpiresIn)> GenerateTokenAsync(
+            EventTicketingUser user,
+            DateTime sessionExpiresAt)
         {
             var roles = await _userManager.GetRolesAsync(user);
 
@@ -114,17 +151,28 @@ namespace EventTicketing.Infrastructure.Identity
             var signingKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(keyText));
             var credentials = new SigningCredentials(signingKey, SecurityAlgorithms.HmacSha256);
 
-            var expiryMinutes = GetAccessTokenExpiryMinutes();
             var now = DateTime.UtcNow;
+            var accessExpiresAt = now.AddMinutes(GetAccessTokenExpiryMinutes());
+            if (sessionExpiresAt < accessExpiresAt)
+            {
+                accessExpiresAt = sessionExpiresAt;
+            }
+
+            var expiresIn = (int)Math.Ceiling((accessExpiresAt - now).TotalSeconds);
+            if (expiresIn < 1)
+            {
+                expiresIn = 1;
+            }
+
             var token = new JwtSecurityToken(
                 issuer: _configuration["Jwt:Issuer"],
                 audience: _configuration["Jwt:Audience"],
                 claims: claims,
                 notBefore: now,
-                expires: now.AddMinutes(expiryMinutes),
+                expires: accessExpiresAt,
                 signingCredentials: credentials);
 
-            return new JwtSecurityTokenHandler().WriteToken(token);
+            return (new JwtSecurityTokenHandler().WriteToken(token), expiresIn);
         }
 
         public async Task<AuthResponse> RegisterAsync(RegisterRequest request)
@@ -216,54 +264,102 @@ namespace EventTicketing.Infrastructure.Identity
                 return AuthResponse.Failure("This account has been suspended.");
             }
 
-            var token = await GenerateTokenAsync(user);
-            var refreshToken = await IssueRefreshTokenAsync(user.Id);
-            return AuthResponse.Success(token, refreshToken, GetAccessTokenExpiryMinutes() * 60);
+            var now = DateTime.UtcNow;
+            var absoluteExpiresAt = now.AddMinutes(GetRefreshTokenAbsoluteMinutes());
+            var refresh = CreateRefreshToken(user.Id, Guid.NewGuid(), absoluteExpiresAt, GetRefreshTokenIdleMinutes(), now);
+            _db.RefreshTokens.Add(refresh.Entity);
+
+            var access = await GenerateTokenAsync(user, absoluteExpiresAt);
+            await _db.SaveChangesAsync();
+
+            return AuthResponse.Success(access.Token, refresh.RawToken, access.ExpiresIn);
         }
 
         public async Task<AuthResponse> RefreshAsync(RefreshTokenRequest request)
         {
             var now = DateTime.UtcNow;
             var tokenHash = HashRefreshToken(request.RefreshToken);
-            var stored = await _db.RefreshTokens.FirstOrDefaultAsync(t => t.TokenHash == tokenHash);
 
-            if (stored is null || stored.RevokedAt is not null || stored.ExpiresAt <= now)
+            await using var transaction = await _db.Database.BeginTransactionAsync();
+
+            var stored = await _db.RefreshTokens
+                .FromSqlInterpolated($"SELECT * FROM \"RefreshTokens\" WHERE \"TokenHash\" = {tokenHash} FOR UPDATE")
+                .FirstOrDefaultAsync();
+
+            now = DateTime.UtcNow;
+
+            if (stored is null)
             {
                 return AuthResponse.FailureWithCode("refresh_failed", "Session expired. Please log in again.");
+            }
+
+            if (stored.ExpiresAt <= now || stored.AbsoluteExpiresAt <= now)
+            {
+                await RevokeFamilyAsync(stored.FamilyId, now);
+                await transaction.CommitAsync();
+                return AuthResponse.FailureWithCode("refresh_failed", "Session expired. Please log in again.");
+            }
+
+            if (stored.RevokedAt is not null)
+            {
+                var grace = TimeSpan.FromSeconds(GetRotationGraceSeconds());
+                var withinGrace = stored.ReplacedByTokenHash is not null
+                    && stored.RevokedAt.Value > now.Subtract(grace);
+
+                if (!withinGrace)
+                {
+                    await RevokeFamilyAsync(stored.FamilyId, now);
+                    await transaction.CommitAsync();
+                    return AuthResponse.FailureWithCode("refresh_failed", "Session expired. Please log in again.");
+                }
             }
 
             var user = await _userManager.FindByIdAsync(stored.UserId.ToString());
             if (user is null)
             {
+                await RevokeFamilyAsync(stored.FamilyId, now);
+                await transaction.CommitAsync();
                 return AuthResponse.FailureWithCode("refresh_failed", "Session expired. Please log in again.");
             }
 
             if (user.IsSuspended)
             {
-                stored.RevokedAt = now;
-                await _db.SaveChangesAsync();
+                await RevokeFamilyAsync(stored.FamilyId, now);
+                await transaction.CommitAsync();
                 return AuthResponse.FailureWithCode("account_suspended", "This account has been suspended.");
             }
 
-            stored.ExpiresAt = now.AddMinutes(GetRefreshTokenIdleMinutes());
-            await _db.SaveChangesAsync();
+            var refresh = CreateRefreshToken(
+                stored.UserId,
+                stored.FamilyId,
+                stored.AbsoluteExpiresAt,
+                GetRefreshTokenIdleMinutes(),
+                now);
 
-            var token = await GenerateTokenAsync(user);
-            return AuthResponse.Success(token, null, GetAccessTokenExpiryMinutes() * 60);
+            stored.RevokedAt ??= now;
+            stored.ReplacedByTokenHash = refresh.Entity.TokenHash;
+            _db.RefreshTokens.Add(refresh.Entity);
+
+            var access = await GenerateTokenAsync(user, stored.AbsoluteExpiresAt);
+            await _db.SaveChangesAsync();
+            await transaction.CommitAsync();
+
+            return AuthResponse.Success(access.Token, refresh.RawToken, access.ExpiresIn);
         }
 
         public async Task LogoutAsync(RefreshTokenRequest request)
         {
             var tokenHash = HashRefreshToken(request.RefreshToken);
-            var stored = await _db.RefreshTokens.FirstOrDefaultAsync(t => t.TokenHash == tokenHash);
+            var stored = await _db.RefreshTokens
+                .AsNoTracking()
+                .FirstOrDefaultAsync(t => t.TokenHash == tokenHash);
 
-            if (stored is null || stored.RevokedAt is not null)
+            if (stored is null)
             {
                 return;
             }
 
-            stored.RevokedAt = DateTime.UtcNow;
-            await _db.SaveChangesAsync();
+            await RevokeFamilyAsync(stored.FamilyId, DateTime.UtcNow);
         }
     }
 }
