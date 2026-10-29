@@ -1,0 +1,39 @@
+# .NET build output
+**/bin/
+**/obj/
+**/TestResults/
+
+# IDE and user files
+.vs/
+.idea/
+.vscode/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Frontend dependencies and build output
+**/node_modules/
+**/dist/
+**/dist-ssr/
+**/test-results/
+**/playwright-report/
+**/blob-report/
+
+# Local secrets and environment
+.env
+.env.*
+!.env.example
+appsettings.*.local.json
+secrets.json
+
+# Local reference material
+/docs/
+
+# Logs and OS files
+*.log
+.DS_Store
+Thumbs.db
+
+# Local scratch files
+ctx_tmp.cs
