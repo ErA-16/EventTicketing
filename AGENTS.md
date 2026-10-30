@@ -29,13 +29,17 @@ Domain → Application → Infrastructure → Api. Deployment later: Render (API
 | `ConnectionStrings:DefaultConnection` | user secrets, Api project `UserSecretsId 5068da3c…` | env var `ConnectionStrings__DefaultConnection` |
 | `Jwt:Key` | user secrets (48 random chars) | env var `Jwt__Key` |
 | `Jwt:Issuer`, `Jwt:Audience`, `Jwt:ExpiryMinutes` | `appsettings.json` | same |
-| `RefreshToken:IdleMinutes` | `appsettings.json` (480) | same |
+| `RefreshToken:IdleMinutes`, `AbsoluteMinutes`, `RotationGraceSeconds` | `appsettings.json` (480 / 10080 / 10) | same |
+| `DataRetention:*` | `appsettings.json` (Slice 18) | same |
 | `Seed:AdminEmail`, `Seed:AdminPassword` | user secrets | env vars `Seed__AdminEmail`, `Seed__AdminPassword` |
 | `Seed:DemoOrganizerEmail`, `Seed:DemoOrganizerPassword` | user secrets | env vars `Seed__DemoOrganizerEmail`, `Seed__DemoOrganizerPassword` |
 
-`Jwt:ExpiryMinutes` is **5**. Validation keeps the existing 1-minute clock skew, so a token may be
-accepted for about 6 minutes. An 8-hour (480-minute) sliding refresh token renews the access token; it is
-stored hashed, reused without rotation, and revoked on logout or suspension.
+`Jwt:ExpiryMinutes` is **15** (Slice 18). Validation keeps the existing 1-minute clock skew, so a token
+may be accepted for about 16 minutes. Refresh tokens **rotate on every refresh** (Slice 18): each refresh
+issues a new token in the same family, the old one is revoked and linked through `ReplacedByTokenHash`;
+replaying a rotated token after the 10-second grace window revokes the whole family. The 8-hour idle
+window ($480$ minutes) and the 7-day absolute cap (`AbsoluteMinutes` 10080) both apply; tokens are stored
+hashed only, and logout or suspension revokes the whole family.
 
 `DemoDataSeeder` is opt-in: without the demo organizer email and password it skips. With them, a fresh
 database gets one organizer and exactly the five portfolio events. Existing local events are not changed
@@ -128,7 +132,8 @@ duplicate email → 400; wrong password → 401; admin login → 200 with JWT; r
 - Clean up the migration pair in Neon (`Initial Migration` + empty `InitialCreate`).
 - `.github/` was removed entirely; `AGENTS.md` remains the only project instruction source.
 - Password reset: not in the API contract; email provider decision open (default: log to console).
-- Expiry job now marks stale holds `Expired` every 60s (batch 100). Rows are retained forever; no purge job yet.
+- Expiry job now marks stale holds `Expired` every 60s (batch 100). The Slice 18 retention sweep now
+  purges dead rows, old keys and dead refresh tokens; see Slice 18.
 - Wallet funding is intentionally non-idempotent (test-only); a real payment provider must own top-up idempotency.
 - `me/tickets` is cursor-paginated; see Slice 17.
 
@@ -277,7 +282,7 @@ duplicate email → 400; wrong password → 401; admin login → 200 with JWT; r
 - A held reservation for a **different** ticket type → 409. A paid/cancelled/expired reservation for the event → 409. An expired hold → 410.
 - A direct purchase creates a `Paid` reservation internally, so stock math and the one-ticket-per-reservation rule stay unchanged.
 - The 24h retention is measured from `PaidAt`, not creation. Same key + same user + same event/type replays the ticket; after 24h → 409 `idempotency_key_expired`.
-- Keys stay stored for uniqueness; there is no purge job. A key reused for a different event/type → 409.
+- Keys stay stored for uniqueness; the Slice 18 retention sweep clears them after the 24h window. A key reused for a different event/type → 409.
 - A failed payment does not burn the key: the reservation/ticket/key change is one transaction.
 - Concurrent same-key purchases: the loser sees the unique `(UserId, PaymentIdempotencyKey)` violation, rolls back to a clean transaction, and replays the winner's ticket.
 - Existing reserve → pay flow unchanged.
@@ -1146,8 +1151,10 @@ duplicate email → 400; wrong password → 401; admin login → 200 with JWT; r
 ## Next
 - **Render deployment is paused by ErA for now.** The Render/Cloudflare notes below are future
   reference only.
-- **Git is still required:** this folder is not a repository and has no remote. ErA chose Dockerfile
-  only, so do not initialize git or create a GitHub remote without permission.
+- **Git is set up and pushed:** the repo is initialized with remote `origin` at
+  `https://github.com/ErA-16/EventTicketing.git`; `main` is pushed through `2afed67`
+  (`Slice 18: refresh-token rotation + data-retention purge`); the working tree is clean.
+  Do not push again without permission.
 - `Dockerfile` + `.dockerignore` now exist at the repo root. The API image uses .NET 10 multi-stage,
   listens on Render's `PORT` (fallback 8080), and runs as the non-root `app` user. Docker is not
   installed locally, so the image itself has not been built; `dotnet publish -c Release` was verified,
@@ -1164,7 +1171,7 @@ duplicate email → 400; wrong password → 401; admin login → 200 with JWT; r
 - The write test has **0 failures**, but p95 is still ~34 s because 20 buyers serialize on one
   ticket-type row. Decide whether to accept this or move to Option B (split reserve/pay) or Option C
   (atomic `ReservedQuantity` counter) before production load.
-- No slice committed yet. The refresh-token purge and retention decisions are now done in Slice 18;
-  still uncommitted.
+- Slice 18 is committed and pushed (`2afed67`). The working tree is clean; commit future slices only
+  on ErA's say-so.
 - Housekeeping: clean the Neon migration pair and remove the temporary `fe.*` test users/events if the
   shared DB should stay tidy.
