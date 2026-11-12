@@ -4,9 +4,7 @@
 
 ASP.NET Core 10 · PostgreSQL · React 19 · Built for events in Lagos
 
-<!-- Add your live links here once you've copied the real URLs:
-🌐 [Live app](https://YOUR-PAGES-URL) · 📡 [API](https://YOUR-RENDER-URL/swagger)
--->
+🌐 [Live app](https://eventticketing-65x.pages.dev/)
 
 <!-- Add a hero screenshot here: ![EventTicketing home](assets/home.png) -->
 
@@ -16,9 +14,9 @@ ASP.NET Core 10 · PostgreSQL · React 19 · Built for events in Lagos
 
 Anyone who has watched a popular Lagos event go on sale knows the scene: tickets drop at noon, the site crawls, people pay and get nothing, and the organiser spends the night sorting out refunds.
 
-I wanted to build the system that handles that moment properly. Not a CRUD app with a "tickets" table, but something where thousands of people can reach for the last few tickets at once and the numbers still add up.
+I wanted to build the system that handles that moment properly. Not a CRUD app with a "tickets" table, but something where thousands of people can reach for the last few tickets at once and the nu[...]
 
-Before I wrote any code I wrote a brief: who uses it, what each person can and cannot do, what the numbers look like at peak, and where it could break. The code followed the brief, not the other way round.
+Before I wrote any code I wrote a brief: who uses it, what each person can and cannot do, what the numbers look like at peak, and where it could break. The code followed the brief, not the other w[...]
 
 ---
 
@@ -58,13 +56,13 @@ Reserving locks the ticket type's row, counts, and inserts, all in one transacti
 Payment requires an `Idempotency-Key`. Retry with the same key and you get the same ticket back. A failed payment doesn't burn the key, so a user can top up and try again.
 
 ### ⏱️ Holds expire on their own
-A background job flips expired holds every minute. But stock maths ignores expired holds anyway, so correctness never depends on the job running. If the server sleeps for an hour, nobody sees wrong numbers.
+A background job flips expired holds every minute. But stock maths ignores expired holds anyway, so correctness never depends on the job running. If the server sleeps for an hour, nobody sees wron[...]
 
 ### 🔁 One scan per ticket
 Check-in is a single conditional update (`WHERE CheckedInAt IS NULL`). Ten simultaneous scans of one code: one success.
 
 ### 🔑 Sessions that fail safely
-Short-lived access tokens (15 min) plus rotating refresh tokens with a 7-day absolute cap. Replaying an old refresh token revokes the whole session family. Suspending an organiser blocks their existing tokens immediately.
+Short-lived access tokens (15 min) plus rotating refresh tokens with a 7-day absolute cap. Replaying an old refresh token revokes the whole session family. Suspending an organiser blocks their exi[...]
 
 ### 🚫 Suspension without rewriting data
 Suspending an organiser sets one flag. Public queries hide their events. Nothing is looped and rewritten, and unsuspending is instant.
@@ -74,13 +72,13 @@ Suspending an organiser sets one flag. Public queries hide their events. Nothing
 ## Decisions worth explaining
 
 | Decision | Why |
-|---|---|
-| Stock is never cached | The event page is cached, then live stock is laid on top. A stale count can never cause an oversell. |
-| Modular monolith, not microservices | One person, one deployable. The layers keep it easy to split later. |
-| Roles live in Identity's tables | One source of truth instead of a role column that can disagree. |
-| Images in R2, not the database | The database keeps only the object key. Small database, cheap images. |
-| No refunds in the MVP | Refunds are a whole feature of their own. Out on purpose. |
-| Rate limits from day one | Login, sign-up, reserve, pay, wallet and check-in are all limited. |
+| |---|---|
+| | Stock is never cached | The event page is cached, then live stock is laid on top. A stale count can never cause an oversell. |
+| | Modular monolith, not microservices | One person, one deployable. The layers keep it easy to split later. |
+| | Roles live in Identity's tables | One source of truth instead of a role column that can disagree. |
+| | Images in R2, not the database | The database keeps only the object key. Small database, cheap images. |
+| | No refunds in the MVP | Refunds are a whole feature of their own. Out on purpose. |
+| | Rate limits from day one | Login, sign-up, reserve, pay, wallet and check-in are all limited. |
 
 ---
 
